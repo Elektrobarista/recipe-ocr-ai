@@ -203,7 +203,8 @@ def call_openai(
 
 def build_output_path(image_path: Path, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    # Nutze Mikrosekunden im Timestamp, um Kollisionen bei paralleler Verarbeitung zu vermeiden
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     base_name = f"{image_path.stem}-{timestamp}.json"
     return output_dir / base_name
 
@@ -263,7 +264,7 @@ def _load_tandoor_config(args: argparse.Namespace) -> tuple[str, str]:
     return base_url.rstrip("/"), token
 
 
-def _send_to_tandoor(recipe: dict, base_url: str, token: str) -> None:
+def _send_to_tandoor(recipe: dict, base_url: str, token: str) -> bool:
     url = f"{base_url}/api/recipe/"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -276,12 +277,15 @@ def _send_to_tandoor(recipe: dict, base_url: str, token: str) -> None:
         json=recipe,
         timeout=(10, 300),
     )
-    if response.status_code not in (200, 201):
-        print(
-            f"Failed to import recipe '{recipe.get('name', '')}' "
-            f"({response.status_code}): {response.text}",
-            file=sys.stderr,
-        )
+    if response.status_code in (200, 201):
+        return True
+
+    print(
+        f"Failed to import recipe '{recipe.get('name', '')}' "
+        f"({response.status_code}): {response.text}",
+        file=sys.stderr,
+    )
+    return False
 
 
 def main() -> None:
@@ -309,6 +313,10 @@ def main() -> None:
         if args.schema_dir:
             schema_dir = Path(args.schema_dir).expanduser().resolve()
             schema_files = _iter_schema_files(schema_dir)
+            if not schema_files:
+                raise SystemExit(
+                    f"No schema.org Recipe JSON files found in directory: {schema_dir}",
+                )
         else:
             schema_path = Path(args.schema_json).expanduser().resolve()
             if not schema_path.exists():
@@ -373,8 +381,9 @@ def main() -> None:
         for tandoor_file in files:
             with tandoor_file.open("r", encoding="utf-8") as f:
                 recipe = json.load(f)
-            _send_to_tandoor(recipe, base_url=base_url, token=token)
-            print(f"Imported Tandoor JSON from {tandoor_file}")
+            ok = _send_to_tandoor(recipe, base_url=base_url, token=token)
+            if ok:
+                print(f"Imported Tandoor JSON from {tandoor_file}")
 
         return
 
@@ -383,6 +392,9 @@ def main() -> None:
         raise SystemExit(
             "For image processing, provide --output-dir and either --image or --image-dir.",
         )
+
+    if args.image and args.image_dir:
+        raise SystemExit("Use either --image or --image-dir, not both.")
 
     output_dir = Path(args.output_dir).expanduser().resolve()
 
@@ -398,8 +410,12 @@ def main() -> None:
     api_key, prompt = load_config()
     model = args.model or os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
 
-    # Begrenze parallele Requests, um Rate Limits berücksichtigen zu können
-    concurrency = args.concurrency or int(os.getenv("OPENAI_CONCURRENCY", "2"))
+    # Begrenze parallele Requests, um Rate Limits berücksichtigen zu können.
+    # Dabei explizit zwischen None (nicht gesetzt) und 0 unterscheiden.
+    if args.concurrency is not None:
+        concurrency = args.concurrency
+    else:
+        concurrency = int(os.getenv("OPENAI_CONCURRENCY", "2"))
     concurrency = max(1, concurrency)
 
     if len(image_files) == 1 or concurrency == 1:
@@ -413,6 +429,9 @@ def main() -> None:
                 max_tokens=args.max_tokens,
             )
         return
+
+    had_errors = False
+    failed_images: list[tuple[Path, Exception]] = []
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         future_to_image = {
@@ -433,7 +452,15 @@ def main() -> None:
             try:
                 future.result()
             except Exception as exc:  # noqa: BLE001
+                had_errors = True
+                failed_images.append((img, exc))
                 print(f"Error processing image {img}: {exc}", file=sys.stderr)
+
+    if had_errors:
+        summary_lines = ["One or more images failed to process:"]
+        for img, exc in failed_images:
+            summary_lines.append(f"- {img}: {exc}")
+        raise SystemExit("\n".join(summary_lines))
 
 
 if __name__ == "__main__":

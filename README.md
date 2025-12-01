@@ -102,3 +102,7 @@ Wenn du schon Tandoor-kompatible JSON-Dateien (z. B. durch einen vorherigen Dr
   ```
 
 Mit `--tandoor-dry-run` werden in diesem Modus nur die Dateien aufgelistet, die importiert würden, ohne einen API-Aufruf zu machen.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

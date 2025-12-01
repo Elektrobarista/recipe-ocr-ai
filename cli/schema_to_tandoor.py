@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Optional
 
 def _parse_number(value: str) -> Optional[float]:
     """Extract the first numeric value from a string and convert to float."""
-    match = re.search(r"[-+]?\d+[.,]?\d*", value)
+    # Unterstützt auch Formate mit führendem Dezimaltrennzeichen wie ".5"
+    match = re.search(r"[-+]?(?:\d+[.,]?\d*|\d*[.,]\d+)", value)
     if not match:
         return None
     num = match.group(0).replace(",", ".")
@@ -46,14 +47,20 @@ def _parse_ingredient(item: str) -> Dict[str, Any]:
         name_part, rest = text.split(":", 1)
         name_part = name_part.strip()
         rest = rest.strip()
-        m2 = leading_pattern.match(rest)
         amount = ""
         unit = ""
-        if m2:
-            amount, unit, _ = m2.groups()
-        elif rest:
-            # Fallback: alles als Einheit interpretieren
-            unit = rest
+
+        # Spezieller Parser für "<amount> <unit>" (z. B. "125 g" oder "2 EL Olivenöl")
+        parts = rest.split()
+        if parts:
+            amount_candidate = parts[0]
+            if _parse_number(amount_candidate) is not None and len(parts) >= 2:
+                amount = amount_candidate
+                unit = " ".join(parts[1:])
+            else:
+                # Fallback: komplette Rest-Zeile als Einheit behandeln
+                unit = rest
+
         return {
             "food": name_part,
             "amount": _parse_number(amount) or 0.0,
@@ -109,6 +116,12 @@ def map_schema_to_tandoor(schema_recipe: Dict[str, Any]) -> Dict[str, Any]:
     steps: List[Dict[str, Any]] = []
     raw_steps = schema_recipe.get("recipeInstructions", []) or []
 
+    # recipeInstructions kann entweder eine Liste von Schritten ODER ein einzelner String sein.
+    # Wenn es ein String oder ein einzelnes Objekt ist, in eine Liste verpacken,
+    # damit wir nicht versehentlich Zeichen/Keys iterieren.
+    if isinstance(raw_steps, (str, dict)):
+        raw_steps = [raw_steps]
+
     # Baue eine gemeinsame Zutatenliste, die bei Bedarf einem Step zugeordnet wird.
     common_step_ingredients: List[Dict[str, Any]] = []
     for ing in ingredients:
@@ -127,7 +140,8 @@ def map_schema_to_tandoor(schema_recipe: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
-    for idx, step in enumerate(raw_steps):
+    first_step_assigned = False
+    for step in raw_steps:
         if isinstance(step, dict):
             text = (step.get("text") or "").strip()
             name = (step.get("name") or "").strip()
@@ -137,9 +151,13 @@ def map_schema_to_tandoor(schema_recipe: Dict[str, Any]) -> Dict[str, Any]:
         if not text:
             continue
 
-        # Nur dem ersten Schritt die vollständige Zutatenliste geben,
+        # Nur dem ersten NICHT-LEEREN Schritt die vollständige Zutatenliste geben,
         # damit sie nicht in jedem Schritt dupliziert wird.
-        step_ingredients: List[Dict[str, Any]] = common_step_ingredients if idx == 0 else []
+        if not first_step_assigned:
+            step_ingredients = common_step_ingredients
+            first_step_assigned = True
+        else:
+            step_ingredients = []
 
         steps.append(
             {
