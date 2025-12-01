@@ -38,11 +38,14 @@ Es gibt zwei klar getrennte Modi, die sich gegenseitig ausschließen:
   ```bash
   python cli/main.py \
     --image-dir ./images \
-    --output-dir ./output
+    --output-dir ./output \
+    --concurrency 2
   ```
 
   - Findet alle `*.jpg`, `*.jpeg`, `*.png` im Ordner.
   - Erzeugt für jede Datei ein eigenes schema.org Recipe JSON im Output-Ordner.
+
+Standardmäßig werden bis zu 2 Bilder parallel gegen die OpenAI API geschickt (`OPENAI_CONCURRENCY=2`). Mit `--concurrency` oder der Umgebungsvariable `OPENAI_CONCURRENCY` kannst du die Parallelität an dein OpenAI-Rate-Limit anpassen.
 
 Optional können mit `--model` und `--max-tokens` das verwendete Modell bzw. die maximale Antwortlänge angepasst werden.
 

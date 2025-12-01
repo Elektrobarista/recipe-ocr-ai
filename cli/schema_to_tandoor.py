@@ -3,10 +3,22 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
-def _parse_ingredient(item: str) -> Dict[str, str]:
+def _parse_number(value: str) -> Optional[float]:
+    """Extract the first numeric value from a string and convert to float."""
+    match = re.search(r"[-+]?\d+[.,]?\d*", value)
+    if not match:
+        return None
+    num = match.group(0).replace(",", ".")
+    try:
+        return float(num)
+    except ValueError:
+        return None
+
+
+def _parse_ingredient(item: str) -> Dict[str, Any]:
     """
     Parse a free-form ingredient string into {food, amount, unit}.
 
@@ -25,7 +37,7 @@ def _parse_ingredient(item: str) -> Dict[str, str]:
         amount, unit, food = m.groups()
         return {
             "food": food.strip(),
-            "amount": amount.strip(),
+            "amount": _parse_number(amount) or 0.0,
             "unit": unit.strip(),
         }
 
@@ -44,7 +56,7 @@ def _parse_ingredient(item: str) -> Dict[str, str]:
             unit = rest
         return {
             "food": name_part,
-            "amount": amount.strip(),
+            "amount": _parse_number(amount) or 0.0,
             "unit": unit.strip(),
         }
 
@@ -55,14 +67,14 @@ def _parse_ingredient(item: str) -> Dict[str, str]:
         food, amount, unit = m3.groups()
         return {
             "food": food.strip(),
-            "amount": amount.strip(),
+            "amount": _parse_number(amount) or 0.0,
             "unit": unit.strip(),
         }
 
-    # Fallback: nur Name bekannt
+    # Fallback: nur Name bekannt, Menge = 1, Einheit leer
     return {
         "food": text,
-        "amount": "",
+        "amount": 1.0,
         "unit": "",
     }
 
@@ -74,7 +86,7 @@ def map_schema_to_tandoor(schema_recipe: Dict[str, Any]) -> Dict[str, Any]:
 
     # --- Basic Fields ---
     tandoor: Dict[str, Any] = {
-        "name": schema_recipe.get("name", ""),
+        "name": (schema_recipe.get("name") or "").strip(),
         "description": schema_recipe.get("description", ""),
         "instructions": "",
         "ingredients": [],
@@ -86,7 +98,7 @@ def map_schema_to_tandoor(schema_recipe: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     # --- Ingredients Mapping ---
-    ingredients: List[Dict[str, str]] = []
+    ingredients: List[Dict[str, Any]] = []
     for item in schema_recipe.get("recipeIngredient", []) or []:
         if not isinstance(item, str):
             continue
@@ -94,30 +106,84 @@ def map_schema_to_tandoor(schema_recipe: Dict[str, Any]) -> Dict[str, Any]:
     tandoor["ingredients"] = ingredients
 
     # --- Instructions Mapping ---
-    steps: List[Dict[str, str]] = []
-    for step in schema_recipe.get("recipeInstructions", []) or []:
+    steps: List[Dict[str, Any]] = []
+    raw_steps = schema_recipe.get("recipeInstructions", []) or []
+
+    # Baue eine gemeinsame Zutatenliste, die bei Bedarf einem Step zugeordnet wird.
+    common_step_ingredients: List[Dict[str, Any]] = []
+    for ing in ingredients:
+        food_name = ing["food"]
+        unit_name = ing["unit"] or "Stück"
+        amount = ing["amount"] or 0.0
+        common_step_ingredients.append(
+            {
+                "food": {
+                    "name": food_name,
+                },
+                "unit": {
+                    "name": unit_name,
+                },
+                "amount": amount,
+            }
+        )
+
+    for idx, step in enumerate(raw_steps):
         if isinstance(step, dict):
             text = (step.get("text") or "").strip()
+            name = (step.get("name") or "").strip()
         else:
             text = str(step).strip()
-        if text:
-            steps.append({"instruction": text})
+            name = ""
+        if not text:
+            continue
+
+        # Nur dem ersten Schritt die vollständige Zutatenliste geben,
+        # damit sie nicht in jedem Schritt dupliziert wird.
+        step_ingredients: List[Dict[str, Any]] = common_step_ingredients if idx == 0 else []
+
+        steps.append(
+            {
+                "name": name,
+                "instruction": text,
+                "ingredients": step_ingredients,
+            }
+        )
+
     tandoor["steps"] = steps
     tandoor["instructions"] = "\n\n".join(s["instruction"] for s in steps)
 
-    # --- Nutrition Mapping ---
+    # --- Nutrition Mapping (Tandoor expects numeric macros) ---
     nutrition = schema_recipe.get("nutrition") or {}
+    carbs_src = ""
+    fats_src = ""
+    proteins_src = ""
+    cals_src = ""
     if isinstance(nutrition, dict):
-        tandoor["nutrition"] = {
-            "servingSize": nutrition.get("servingSize", ""),
-            "calories": nutrition.get("calories", ""),
-            "fatContent": nutrition.get("fatContent", ""),
-            "saturatedFatContent": nutrition.get("saturatedFatContent", ""),
-            "carbohydrateContent": nutrition.get("carbohydrateContent", ""),
-            "sugarContent": nutrition.get("sugarContent", ""),
-            "proteinContent": nutrition.get("proteinContent", ""),
-            "saltContent": nutrition.get("saltContent", ""),
-        }
+        carbs_src = nutrition.get("carbohydrateContent", "") or ""
+        fats_src = nutrition.get("fatContent", "") or ""
+        proteins_src = nutrition.get("proteinContent", "") or ""
+        cals_src = nutrition.get("calories", "") or ""
+
+    tandoor["nutrition"] = {
+        # Tandoor expects numeric macros; fallback auf 0.0 wenn unbekannt
+        "carbohydrates": _parse_number(carbs_src) or 0.0,
+        "fats": _parse_number(fats_src) or 0.0,
+        "proteins": _parse_number(proteins_src) or 0.0,
+        "calories": _parse_number(cals_src) or 0.0,
+    }
+
+    # --- Servings (recipeYield -> int) ---
+    yield_str = str(schema_recipe.get("recipeYield", "") or "")
+    servings_num = _parse_number(yield_str) or 0.0
+    tandoor["servings"] = int(servings_num) if servings_num > 0 else 0
+
+    # Sicherstellen, dass ein Name aus dem Inhalt stammt
+    if not tandoor["name"]:
+        raise SystemExit(
+            "schema.org Recipe JSON enthält keinen 'name'. "
+            "Passe den Prompt so an, dass immer ein Rezeptname ausgegeben wird, "
+            "und generiere die JSON-Datei neu.",
+        )
 
     return tandoor
 

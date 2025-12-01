@@ -6,13 +6,14 @@ import base64
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 
-from .schema_to_tandoor import map_schema_to_tandoor
+from cli.schema_to_tandoor import map_schema_to_tandoor
 
 ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".png"}
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
@@ -90,6 +91,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Maximum completion tokens in the response (optional).",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help=(
+            "Maximum number of parallel OpenAI requests when processing a folder of "
+            "images (default from OPENAI_CONCURRENCY env or 2)."
+        ),
     )
     return parser.parse_args()
 
@@ -198,6 +208,34 @@ def build_output_path(image_path: Path, output_dir: Path) -> Path:
     return output_dir / base_name
 
 
+def _process_image(
+    image_path: Path,
+    output_dir: Path,
+    api_key: str,
+    prompt: str,
+    model: str,
+    max_tokens: int | None,
+) -> None:
+    validate_image_path(image_path)
+    image_payload = build_image_payload(image_path)
+
+    result = call_openai(
+        api_key=api_key,
+        prompt=prompt,
+        image_content=image_payload,
+        model=model,
+        max_tokens=max_tokens,
+    )
+
+    output_path = build_output_path(image_path, output_dir)
+    recipe_json = extract_recipe_json(result)
+    output_path.write_text(
+        json.dumps(recipe_json, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    print(f"Response written to {output_path}")
+
+
 def _iter_image_files(image_dir: Path) -> list[Path]:
     files: list[Path] = []
     if not image_dir.exists() or not image_dir.is_dir():
@@ -228,11 +266,16 @@ def _load_tandoor_config(args: argparse.Namespace) -> tuple[str, str]:
 def _send_to_tandoor(recipe: dict, base_url: str, token: str) -> None:
     url = f"{base_url}/api/recipe/"
     headers = {
-        "Authorization": f"Token {token}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    response = requests.post(url, headers=headers, json=recipe, timeout=60)
+    response = requests.post(
+        url,
+        headers=headers,
+        json=recipe,
+        timeout=(10, 300),
+    )
     if response.status_code not in (200, 201):
         print(
             f"Failed to import recipe '{recipe.get('name', '')}' "
@@ -355,26 +398,42 @@ def main() -> None:
     api_key, prompt = load_config()
     model = args.model or os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
 
-    for image_path in image_files:
-        validate_image_path(image_path)
-        image_payload = build_image_payload(image_path)
+    # Begrenze parallele Requests, um Rate Limits berücksichtigen zu können
+    concurrency = args.concurrency or int(os.getenv("OPENAI_CONCURRENCY", "2"))
+    concurrency = max(1, concurrency)
 
-        result = call_openai(
-            api_key=api_key,
-            prompt=prompt,
-            image_content=image_payload,
-            model=model,
-            max_tokens=args.max_tokens,
-        )
+    if len(image_files) == 1 or concurrency == 1:
+        for image_path in image_files:
+            _process_image(
+                image_path=image_path,
+                output_dir=output_dir,
+                api_key=api_key,
+                prompt=prompt,
+                model=model,
+                max_tokens=args.max_tokens,
+            )
+        return
 
-        output_path = build_output_path(image_path, output_dir)
-        recipe_json = extract_recipe_json(result)
-        output_path.write_text(
-            json.dumps(recipe_json, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        future_to_image = {
+            executor.submit(
+                _process_image,
+                image_path=image_path,
+                output_dir=output_dir,
+                api_key=api_key,
+                prompt=prompt,
+                model=model,
+                max_tokens=args.max_tokens,
+            ): image_path
+            for image_path in image_files
+        }
 
-        print(f"Response written to {output_path}")
+        for future in as_completed(future_to_image):
+            img = future_to_image[future]
+            try:
+                future.result()
+            except Exception as exc:  # noqa: BLE001
+                print(f"Error processing image {img}: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":
