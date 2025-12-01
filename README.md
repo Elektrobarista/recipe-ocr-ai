@@ -17,11 +17,11 @@
 
 ## Usage
 
-Es gibt zwei klar getrennte Modi, die sich gegenseitig ausschließen:
+There are three distinct modes that are mutually exclusive:
 
-### Modus 1: Bild(er) → schema.org Recipe JSON
+### Mode 1: Image(s) → schema.org Recipe JSON
 
-- **Einzelnes Bild**
+- **Single Image**
 
   ```bash
   python cli/main.py \
@@ -29,11 +29,11 @@ Es gibt zwei klar getrennte Modi, die sich gegenseitig ausschließen:
     --output-dir ./output
   ```
 
-  - Lädt den Prompt aus `CHATGPT_PROMPT` in deiner `.env`.
-  - Schickt das Bild + Prompt an die ChatGPT API.
-  - Speichert ein reines schema.org Recipe JSON als `<image-stem>-<timestamp>.json` in `./output`.
+  - Loads the prompt from `CHATGPT_PROMPT` in your `.env`.
+  - Sends the image + prompt to the ChatGPT API.
+  - Saves a pure schema.org Recipe JSON as `<image-stem>-<timestamp>.json` in `./output`.
 
-- **Ganze Ordner mit Bildern**
+- **Entire Folder with Images**
 
   ```bash
   python cli/main.py \
@@ -42,16 +42,16 @@ Es gibt zwei klar getrennte Modi, die sich gegenseitig ausschließen:
     --concurrency 2
   ```
 
-  - Findet alle `*.jpg`, `*.jpeg`, `*.png` im Ordner.
-  - Erzeugt für jede Datei ein eigenes schema.org Recipe JSON im Output-Ordner.
+  - Finds all `*.jpg`, `*.jpeg`, `*.png` in the folder.
+  - Creates a separate schema.org Recipe JSON for each file in the output folder.
 
-Standardmäßig werden bis zu 2 Bilder parallel gegen die OpenAI API geschickt (`OPENAI_CONCURRENCY=2`). Mit `--concurrency` oder der Umgebungsvariable `OPENAI_CONCURRENCY` kannst du die Parallelität an dein OpenAI-Rate-Limit anpassen.
+By default, up to 2 images are sent in parallel to the OpenAI API (`OPENAI_CONCURRENCY=2`). You can adjust the parallelism to your OpenAI rate limit using `--concurrency` or the environment variable `OPENAI_CONCURRENCY`.
 
-Optional können mit `--model` und `--max-tokens` das verwendete Modell bzw. die maximale Antwortlänge angepasst werden.
+Optionally, you can adjust the model used or the maximum response length with `--model` and `--max-tokens`.
 
-### Modus 2: schema.org Recipe JSON → Tandoor JSON (+ optionaler Import)
+### Mode 2: schema.org Recipe JSON → Tandoor JSON (+ optional import)
 
-- **Einzelne Datei konvertieren (ohne Import)**
+- **Convert Single File (without import)**
 
   ```bash
   python cli/main.py \
@@ -59,49 +59,49 @@ Optional können mit `--model` und `--max-tokens` das verwendete Modell bzw. die
     --tandoor-dry-run
   ```
 
-  - Liest ein schema.org Recipe JSON.
-  - Wandelt es in ein Tandoor-kompatibles JSON um.
-  - Schreibt `<recipe-stem>-tandoor.json` neben die Eingabedatei.
+  - Reads a schema.org Recipe JSON.
+  - Converts it to a Tandoor-compatible JSON.
+  - Writes `<recipe-stem>-tandoor.json` next to the input file.
 
-- **Ganzen Ordner konvertieren und nach Tandoor importieren**
+- **Convert Entire Folder and Import to Tandoor**
 
   ```bash
   export TANDOOR_BASE_URL="https://tandoor.example.com"
-  export TANDOOR_API_TOKEN="dein-api-token"
+  export TANDOOR_API_TOKEN="your-api-token"
 
   python cli/main.py \
     --schema-dir ./output
   ```
 
-  - Liest alle `*.json` in `./output`.
-  - Erzeugt jeweils `<name>-tandoor.json`.
-  - POSTet jedes Rezept an `"$TANDOOR_BASE_URL/api/recipe/"`.
+  - Reads all `*.json` in `./output`.
+  - Creates `<name>-tandoor.json` for each.
+  - POSTs each recipe to `"$TANDOOR_BASE_URL/api/recipe/"`.
 
-Alternativ können `--tandoor-base-url` und `--tandoor-token` als CLI-Argumente statt Umgebungsvariablen genutzt werden. Mit `--tandoor-dry-run` werden nur die Tandoor-JSON-Dateien erzeugt, ohne API-Aufruf.
+Alternatively, `--tandoor-base-url` and `--tandoor-token` can be used as CLI arguments instead of environment variables. With `--tandoor-dry-run`, only the Tandoor JSON files are created without making an API call.
 
-### Modus 3: Bereits konvertierte Tandoor JSONs direkt importieren
+### Mode 3: Import Already Converted Tandoor JSONs Directly
 
-Wenn du schon Tandoor-kompatible JSON-Dateien (z. B. durch einen vorherigen Dry-Run) hast, kannst du sie ohne erneute Konvertierung importieren:
+If you already have Tandoor-compatible JSON files (e.g., from a previous dry run), you can import them without re-converting:
 
-- **Einzelne Tandoor-JSON importieren**
+- **Import Single Tandoor JSON**
 
   ```bash
   python cli/main.py \
     --tandoor-json ./output/recipe-tandoor.json \
     --tandoor-base-url https://tandoor.example.com \
-    --tandoor-token dein-api-token
+    --tandoor-token your-api-token
   ```
 
-- **Ganzen Ordner mit Tandoor-JSONs importieren**
+- **Import Entire Folder with Tandoor JSONs**
 
   ```bash
   python cli/main.py \
     --tandoor-json-dir ./output/tandoor-jsons \
     --tandoor-base-url https://tandoor.example.com \
-    --tandoor-token dein-api-token
+    --tandoor-token your-api-token
   ```
 
-Mit `--tandoor-dry-run` werden in diesem Modus nur die Dateien aufgelistet, die importiert würden, ohne einen API-Aufruf zu machen.
+With `--tandoor-dry-run` in this mode, only the files that would be imported are listed without making an API call.
 
 ## License
 
