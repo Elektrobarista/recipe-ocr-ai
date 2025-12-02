@@ -2,9 +2,14 @@
 
 ## Setup
 
+Clone
+```bash
+git clone https://github.com/Elektrobarista/recipe-ocr-ai.git
+```
+
 1. **Install dependencies**
    ```bash
-   cd recipe_ai
+   cd recipe-ocr-ai
    python3 -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
@@ -24,7 +29,7 @@ There are three distinct modes that are mutually exclusive:
 - **Single Image**
 
   ```bash
-  python cli/main.py \
+  python -m cli.main \
     --image /path/to/recipe.jpg \
     --output-dir ./output
   ```
@@ -35,12 +40,12 @@ There are three distinct modes that are mutually exclusive:
 
 - **Entire Folder with Images**
 
-  ```bash
-  python cli/main.py \
-    --image-dir ./images \
-    --output-dir ./output \
-    --concurrency 2
-  ```
+```bash
+python -m cli.main \
+  --image-dir ./images \
+  --output-dir ./output \
+  --concurrency 2
+```
 
   - Finds all `*.jpg`, `*.jpeg`, `*.png` in the folder.
   - Creates a separate schema.org Recipe JSON for each file in the output folder.
@@ -53,11 +58,11 @@ Optionally, you can adjust the model used or the maximum response length with `-
 
 - **Convert Single File (without import)**
 
-  ```bash
-  python cli/main.py \
-    --schema-json ./output/recipe.json \
-    --tandoor-dry-run
-  ```
+```bash
+python -m cli.main \
+  --schema-json ./output/recipe.json \
+  --tandoor-dry-run
+```
 
   - Reads a schema.org Recipe JSON.
   - Converts it to a Tandoor-compatible JSON.
@@ -65,13 +70,13 @@ Optionally, you can adjust the model used or the maximum response length with `-
 
 - **Convert Entire Folder and Import to Tandoor**
 
-  ```bash
-  export TANDOOR_BASE_URL="https://tandoor.example.com"
-  export TANDOOR_API_TOKEN="your-api-token"
+```bash
+export TANDOOR_BASE_URL="https://tandoor.example.com"
+export TANDOOR_API_TOKEN="your-api-token"
 
-  python cli/main.py \
-    --schema-dir ./output
-  ```
+python -m cli.main \
+  --schema-dir ./output
+```
 
   - Reads all `*.json` in `./output`.
   - Creates `<name>-tandoor.json` for each.
@@ -85,21 +90,21 @@ If you already have Tandoor-compatible JSON files (e.g., from a previous dry run
 
 - **Import Single Tandoor JSON**
 
-  ```bash
-  python cli/main.py \
-    --tandoor-json ./output/recipe-tandoor.json \
-    --tandoor-base-url https://tandoor.example.com \
-    --tandoor-token your-api-token
-  ```
+```bash
+python -m cli.main \
+  --tandoor-json ./output/recipe-tandoor.json \
+  --tandoor-base-url https://tandoor.example.com \
+  --tandoor-token your-api-token
+```
 
 - **Import Entire Folder with Tandoor JSONs**
 
-  ```bash
-  python cli/main.py \
-    --tandoor-json-dir ./output/tandoor-jsons \
-    --tandoor-base-url https://tandoor.example.com \
-    --tandoor-token your-api-token
-  ```
+```bash
+python -m cli.main \
+  --tandoor-json-dir ./output/tandoor-jsons \
+  --tandoor-base-url https://tandoor.example.com \
+  --tandoor-token your-api-token
+```
 
 With `--tandoor-dry-run` in this mode, only the files that would be imported are listed without making an API call.
 
