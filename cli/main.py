@@ -12,6 +12,15 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 
 from cli.schema_to_tandoor import map_schema_to_tandoor
 
@@ -216,9 +225,19 @@ def _process_image(
     prompt: str,
     model: str,
     max_tokens: int | None,
+    progress_task: int | None = None,
+    progress: Progress | None = None,
 ) -> None:
+    if progress and progress_task is not None:
+        progress.update(
+            progress_task,
+            description=f"Verarbeite Rezept - {image_path.name}",
+        )
     validate_image_path(image_path)
     image_payload = build_image_payload(image_path)
+
+    if progress and progress_task is not None:
+        progress.update(progress_task, description=f"ChatGPT analysiert {image_path.name}...")
 
     result = call_openai(
         api_key=api_key,
@@ -234,7 +253,10 @@ def _process_image(
         json.dumps(recipe_json, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    print(f"Response written to {output_path}")
+    if progress and progress_task is not None:
+        progress.update(progress_task, description=f"✓ {image_path.name} abgeschlossen")
+    else:
+        print(f"Response written to {output_path}")
 
 
 def _iter_image_files(image_dir: Path) -> list[Path]:
@@ -418,49 +440,106 @@ def main() -> None:
         concurrency = int(os.getenv("OPENAI_CONCURRENCY", "2"))
     concurrency = max(1, concurrency)
 
-    if len(image_files) == 1 or concurrency == 1:
-        for image_path in image_files:
-            _process_image(
-                image_path=image_path,
-                output_dir=output_dir,
-                api_key=api_key,
-                prompt=prompt,
-                model=model,
-                max_tokens=args.max_tokens,
-            )
-        return
+    console = Console()
+    num_images = len(image_files)
 
-    had_errors = False
-    failed_images: list[tuple[Path, Exception]] = []
+    # Progress-Anzeige mit Rich
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        main_task = progress.add_task(
+            f"Verarbeite {num_images} Rezeptbilder...",
+            total=num_images,
+        )
 
-    with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        future_to_image = {
-            executor.submit(
-                _process_image,
-                image_path=image_path,
-                output_dir=output_dir,
-                api_key=api_key,
-                prompt=prompt,
-                model=model,
-                max_tokens=args.max_tokens,
-            ): image_path
-            for image_path in image_files
-        }
+        if len(image_files) == 1 or concurrency == 1:
+            # Einzelne Verarbeitung
+            for idx, image_path in enumerate(image_files):
+                task_id = progress.add_task(
+                    f"Verarbeite Rezept {idx + 1}/{num_images} - {image_path.name}",
+                    total=1,
+                )
+                try:
+                    _process_image(
+                        image_path=image_path,
+                        output_dir=output_dir,
+                        api_key=api_key,
+                        prompt=prompt,
+                        model=model,
+                        max_tokens=args.max_tokens,
+                        progress_task=task_id,
+                        progress=progress,
+                    )
+                    progress.update(task_id, completed=1)
+                    progress.update(main_task, advance=1)
+                except Exception as exc:  # noqa: BLE001
+                    progress.update(
+                        task_id,
+                        description=f"✗ Fehler: {image_path.name}",
+                        completed=1,
+                    )
+                    progress.update(main_task, advance=1)
+                    raise SystemExit(f"Fehler beim Verarbeiten von {image_path}: {exc}") from exc
+        else:
+            # Parallele Verarbeitung
+            had_errors = False
+            failed_images: list[tuple[Path, Exception]] = []
+            task_map: dict[Path, int] = {}
 
-        for future in as_completed(future_to_image):
-            img = future_to_image[future]
-            try:
-                future.result()
-            except Exception as exc:  # noqa: BLE001
-                had_errors = True
-                failed_images.append((img, exc))
-                print(f"Error processing image {img}: {exc}", file=sys.stderr)
+            # Tasks für alle Bilder erstellen
+            for idx, image_path in enumerate(image_files):
+                task_id = progress.add_task(
+                    f"Warte auf Verarbeitung - {image_path.name}",
+                    total=1,
+                )
+                task_map[image_path] = task_id
 
-    if had_errors:
-        summary_lines = ["One or more images failed to process:"]
-        for img, exc in failed_images:
-            summary_lines.append(f"- {img}: {exc}")
-        raise SystemExit("\n".join(summary_lines))
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                future_to_image = {
+                    executor.submit(
+                        _process_image,
+                        image_path=image_path,
+                        output_dir=output_dir,
+                        api_key=api_key,
+                        prompt=prompt,
+                        model=model,
+                        max_tokens=args.max_tokens,
+                        progress_task=task_map[image_path],
+                        progress=progress,
+                    ): image_path
+                    for image_path in image_files
+                }
+
+                for future in as_completed(future_to_image):
+                    img = future_to_image[future]
+                    task_id = task_map[img]
+                    try:
+                        future.result()
+                        progress.update(task_id, completed=1)
+                        progress.update(main_task, advance=1)
+                    except Exception as exc:  # noqa: BLE001
+                        had_errors = True
+                        failed_images.append((img, exc))
+                        progress.update(
+                            task_id,
+                            description=f"✗ Fehler: {img.name}",
+                            completed=1,
+                        )
+                        progress.update(main_task, advance=1)
+
+            if had_errors:
+                console.print("\n[red]Fehler beim Verarbeiten einiger Bilder:[/red]")
+                for img, exc in failed_images:
+                    console.print(f"  [red]✗[/red] {img}: {exc}")
+                raise SystemExit(1)
+
+    # Erfolgsmeldung
+    console.print(f"\n[green]✓ Fertig! {num_images} Rezept(e) erfolgreich verarbeitet.[/green]")
 
 
 if __name__ == "__main__":
