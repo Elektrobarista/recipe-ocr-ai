@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import sys
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from cli.schema_to_tandoor import map_schema_to_tandoor
 
 ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".png"}
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,9 +93,15 @@ def parse_args() -> argparse.Namespace:
         help="Only write Tandoor JSON files, do not POST to the Tandoor API.",
     )
     parser.add_argument(
+        "--api",
+        choices=["openai", "gemini"],
+        default=None,
+        help="API provider to use (defaults to API_PROVIDER env or openai).",
+    )
+    parser.add_argument(
         "--model",
         default=None,
-        help="Override the model name (defaults to OPENAI_MODEL env or gpt-4o-mini).",
+        help="Override the model name (defaults to OPENAI_MODEL/GEMINI_MODEL env or provider default).",
     )
     parser.add_argument(
         "--max-tokens",
@@ -106,8 +114,8 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "Maximum number of parallel OpenAI requests when processing a folder of "
-            "images (default from OPENAI_CONCURRENCY env or 2)."
+            "Maximum number of parallel API requests when processing a folder of "
+            "images (default from OPENAI_CONCURRENCY/GEMINI_CONCURRENCY env or 2)."
         ),
     )
     return parser.parse_args()
@@ -123,14 +131,20 @@ def validate_image_path(image_path: Path) -> None:
         raise SystemExit(f"Unsupported image type '{image_path.suffix}'. Allowed: {allowed}")
 
 
-def load_config() -> tuple[str, str]:
+def load_config(provider: str) -> tuple[str, str]:
     load_dotenv()
-    api_key = os.getenv("OPENAI_API_KEY")
-    prompt = os.getenv("CHATGPT_PROMPT")
-    if not api_key:
-        raise SystemExit("OPENAI_API_KEY missing. Add it to your environment or .env file.")
+    if provider == "gemini":
+        api_key = os.getenv("GEMINI_API_KEY")
+        prompt = os.getenv("GEMINI_PROMPT") or os.getenv("CHATGPT_PROMPT")
+        if not api_key:
+            raise SystemExit("GEMINI_API_KEY missing. Add it to your environment or .env file.")
+    else:  # openai
+        api_key = os.getenv("OPENAI_API_KEY")
+        prompt = os.getenv("CHATGPT_PROMPT")
+        if not api_key:
+            raise SystemExit("OPENAI_API_KEY missing. Add it to your environment or .env file.")
     if not prompt:
-        raise SystemExit("CHATGPT_PROMPT missing. Add it to your environment or .env file.")
+        raise SystemExit("CHATGPT_PROMPT or GEMINI_PROMPT missing. Add it to your environment or .env file.")
     return api_key, prompt
 
 
@@ -141,6 +155,18 @@ def build_image_payload(image_path: Path) -> dict:
     return {
         "type": "image_url",
         "image_url": {"url": f"data:{mime};base64,{encoded}"},
+    }
+
+
+def build_gemini_image_payload(image_path: Path) -> dict:
+    data = image_path.read_bytes()
+    mime = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
+    encoded = base64.b64encode(data).decode("ascii")
+    return {
+        "inline_data": {
+            "mime_type": mime,
+            "data": encoded,
+        }
     }
 
 
@@ -210,6 +236,64 @@ def call_openai(
     return response.json()
 
 
+def call_gemini(
+    api_key: str,
+    prompt: str,
+    image_content: dict,
+    model: str,
+    max_tokens: int | None,
+) -> dict:
+    url = f"{GEMINI_API_BASE_URL}/models/{model}:generateContent"
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    image_content,
+                ]
+            }
+        ],
+        "generationConfig": {
+            "response_mime_type": "application/json",
+        },
+    }
+    if max_tokens is not None:
+        payload["generationConfig"]["maxOutputTokens"] = max_tokens
+    headers = {
+        "Content-Type": "application/json",
+    }
+    response = requests.post(
+        url,
+        headers=headers,
+        json=payload,
+        params={"key": api_key},
+        timeout=300,
+    )
+    if response.status_code != 200:
+        raise SystemExit(
+            f"Gemini API error {response.status_code}: {response.text}",
+        )
+    return response.json()
+
+
+def extract_recipe_json_gemini(response: dict) -> dict:
+    candidates = response.get("candidates")
+    if not candidates:
+        raise SystemExit("Gemini response did not contain any candidates.")
+    content = candidates[0].get("content") or {}
+    parts = content.get("parts", [])
+    
+    for part in parts:
+        text = part.get("text")
+        if text:
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise SystemExit("Model returned non-JSON text.") from exc
+    
+    raise SystemExit("Gemini response did not contain parsable JSON content.")
+
+
 def build_output_path(image_path: Path, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     # Nutze Mikrosekunden im Timestamp, um Kollisionen bei paralleler Verarbeitung zu vermeiden
@@ -225,6 +309,7 @@ def _process_image(
     prompt: str,
     model: str,
     max_tokens: int | None,
+    provider: str,
     progress_task: int | None = None,
     progress: Progress | None = None,
 ) -> None:
@@ -234,21 +319,37 @@ def _process_image(
             description=f"Verarbeite Rezept - {image_path.name}",
         )
     validate_image_path(image_path)
-    image_payload = build_image_payload(image_path)
+
+    if provider == "gemini":
+        image_payload = build_gemini_image_payload(image_path)
+        api_name = "Gemini"
+    else:  # openai
+        image_payload = build_image_payload(image_path)
+        api_name = "ChatGPT"
 
     if progress and progress_task is not None:
-        progress.update(progress_task, description=f"ChatGPT analysiert {image_path.name}...")
+        progress.update(progress_task, description=f"{api_name} analysiert {image_path.name}...")
 
-    result = call_openai(
-        api_key=api_key,
-        prompt=prompt,
-        image_content=image_payload,
-        model=model,
-        max_tokens=max_tokens,
-    )
+    if provider == "gemini":
+        result = call_gemini(
+            api_key=api_key,
+            prompt=prompt,
+            image_content=image_payload,
+            model=model,
+            max_tokens=max_tokens,
+        )
+        recipe_json = extract_recipe_json_gemini(result)
+    else:  # openai
+        result = call_openai(
+            api_key=api_key,
+            prompt=prompt,
+            image_content=image_payload,
+            model=model,
+            max_tokens=max_tokens,
+        )
+        recipe_json = extract_recipe_json(result)
 
     output_path = build_output_path(image_path, output_dir)
-    recipe_json = extract_recipe_json(result)
     output_path.write_text(
         json.dumps(recipe_json, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -261,11 +362,82 @@ def _process_image(
 
 def _iter_image_files(image_dir: Path) -> list[Path]:
     files: list[Path] = []
-    if not image_dir.exists() or not image_dir.is_dir():
-        raise SystemExit(f"Image directory not found: {image_dir}")
+    if not image_dir.exists():
+        raise SystemExit(f"Image directory or file not found: {image_dir}")
+    
+    # Wenn es eine Textdatei ist, zeilenweise Bildpfade einlesen
+    if image_dir.is_file():
+        try:
+            with image_dir.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    img_path = Path(line).expanduser().resolve()
+                    if img_path.exists() and img_path.is_file():
+                        if img_path.suffix.lower() in ALLOWED_SUFFIXES:
+                            files.append(img_path)
+                        else:
+                            print(
+                                f"Warnung: Überspringe {img_path} (nicht unterstütztes Format)",
+                                file=sys.stderr,
+                            )
+                    else:
+                        print(
+                            f"Warnung: Bild nicht gefunden: {img_path}",
+                            file=sys.stderr,
+                        )
+        except Exception as exc:
+            raise SystemExit(f"Fehler beim Lesen der Bildliste {image_dir}: {exc}") from exc
+        if not files:
+            raise SystemExit(f"Keine gültigen Bildpfade in {image_dir} gefunden")
+        return files
+    
+    # Wenn es ein Verzeichnis ist, wie bisher alle Bilder finden
+    if not image_dir.is_dir():
+        raise SystemExit(f"Image path is neither a directory nor a text file: {image_dir}")
     for suffix in ALLOWED_SUFFIXES:
         files.extend(sorted(image_dir.glob(f"*{suffix}")))
     return files
+
+
+def _write_error_log(
+    failed_images: list[tuple[Path, Exception]],
+    output_dir: Path,
+) -> tuple[Path, Path]:
+    """Schreibe detailliertes Fehler-Log und failed-images.txt.
+
+    Returns:
+        Tuple von (error_log_path, failed_images_path)
+    """
+    # Stelle sicher, dass das Output-Verzeichnis existiert
+    # (kann fehlen, wenn Fehler vor build_output_path auftreten)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Nutze Mikrosekunden im Timestamp, um Kollisionen bei paralleler Verarbeitung zu vermeiden
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    error_log_path = output_dir / f"errors-{timestamp}.log"
+    failed_images_path = output_dir / f"failed-images-{timestamp}.txt"
+
+    # Detailliertes Fehler-Log schreiben
+    with error_log_path.open("w", encoding="utf-8") as log_file:
+        log_file.write(f"=== Error Log: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ===\n\n")
+        for img_path, exc in failed_images:
+            log_file.write(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {img_path}\n")
+            log_file.write(f"  Error: {type(exc).__name__}: {exc}\n")
+            log_file.write("  Traceback:\n")
+            # Stacktrace formatieren
+            tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+            for line in tb_lines:
+                log_file.write(f"    {line}")
+            log_file.write("\n")
+
+    # Einfache Liste der fehlgeschlagenen Bildpfade
+    with failed_images_path.open("w", encoding="utf-8") as failed_file:
+        for img_path, _ in failed_images:
+            failed_file.write(f"{img_path}\n")
+
+    return error_log_path, failed_images_path
 
 
 def _iter_schema_files(schema_dir: Path) -> list[Path]:
@@ -429,15 +601,28 @@ def main() -> None:
         image_path = Path(args.image).expanduser().resolve()
         image_files = [image_path]
 
-    api_key, prompt = load_config()
-    model = args.model or os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
+    # Determine API provider
+    provider = args.api or os.getenv("API_PROVIDER", "openai")
+    if provider not in ("openai", "gemini"):
+        raise SystemExit(f"Invalid API provider: {provider}. Must be 'openai' or 'gemini'.")
+
+    api_key, prompt = load_config(provider)
+
+    # Set default model based on provider
+    if args.model:
+        model = args.model
+    elif provider == "gemini":
+        model = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
+    else:  # openai
+        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     # Begrenze parallele Requests, um Rate Limits berücksichtigen zu können.
     # Dabei explizit zwischen None (nicht gesetzt) und 0 unterscheiden.
     if args.concurrency is not None:
         concurrency = args.concurrency
     else:
-        concurrency = int(os.getenv("OPENAI_CONCURRENCY", "2"))
+        env_key = "GEMINI_CONCURRENCY" if provider == "gemini" else "OPENAI_CONCURRENCY"
+        concurrency = int(os.getenv(env_key, "2"))
     concurrency = max(1, concurrency)
 
     console = Console()
@@ -472,6 +657,7 @@ def main() -> None:
                         prompt=prompt,
                         model=model,
                         max_tokens=args.max_tokens,
+                        provider=provider,
                         progress_task=task_id,
                         progress=progress,
                     )
@@ -484,7 +670,15 @@ def main() -> None:
                         completed=1,
                     )
                     progress.update(main_task, advance=1)
-                    raise SystemExit(f"Fehler beim Verarbeiten von {image_path}: {exc}") from exc
+                    # Fehler-Log schreiben
+                    error_log_path, failed_images_path = _write_error_log(
+                        [(image_path, exc)],
+                        output_dir,
+                    )
+                    console.print(f"\n[red]Fehler beim Verarbeiten von {image_path.name}:[/red] {exc}")
+                    console.print(f"[yellow]Fehlgeschlagenes Bild:[/yellow] {failed_images_path}")
+                    console.print(f"[yellow]Detaillierte Fehler:[/yellow] {error_log_path}")
+                    raise SystemExit(1) from exc
         else:
             # Parallele Verarbeitung
             had_errors = False
@@ -509,6 +703,7 @@ def main() -> None:
                         prompt=prompt,
                         model=model,
                         max_tokens=args.max_tokens,
+                        provider=provider,
                         progress_task=task_map[image_path],
                         progress=progress,
                     ): image_path
@@ -533,9 +728,20 @@ def main() -> None:
                         progress.update(main_task, advance=1)
 
             if had_errors:
+                # Fehler-Logs schreiben
+                error_log_path, failed_images_path = _write_error_log(
+                    failed_images,
+                    output_dir,
+                )
                 console.print("\n[red]Fehler beim Verarbeiten einiger Bilder:[/red]")
                 for img, exc in failed_images:
                     console.print(f"  [red]✗[/red] {img}: {exc}")
+                console.print(f"\n[yellow]Fehlgeschlagene Bilder:[/yellow] {failed_images_path}")
+                console.print(f"[yellow]Detaillierte Fehler:[/yellow] {error_log_path}")
+                console.print(
+                    f"\n[yellow]Tipp:[/yellow] Erneut versuchen mit: "
+                    f'python -m cli.main --image-dir "{failed_images_path}" --output-dir "{output_dir}"'
+                )
                 raise SystemExit(1)
 
     # Erfolgsmeldung
