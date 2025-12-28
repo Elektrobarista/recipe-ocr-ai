@@ -625,25 +625,18 @@ def _upload_image_to_tandoor(
     """
     url = f"{base_url}/api/recipe/{recipe_id}/image/"
     
-    # #region agent log
-    with open("/Users/alex/github/recipe_ai/.cursor/debug.log", "a") as f:
-        f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "main.py:624", "message": "Starting image upload", "data": {"url": url, "recipe_id": recipe_id, "image_path": str(image_path), "file_exists": image_path.exists()}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
-    # #endregion
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    mime_type = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
     
     try:
+        # Try PUT first (apiRecipeImageUpdate)
         with image_path.open("rb") as img_file:
             files = {
-                "image": (image_path.name, img_file, "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"),
+                "image": (image_path.name, img_file, mime_type),
             }
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/json",
-            }
-            # #region agent log
-            with open("/Users/alex/github/recipe_ai/.cursor/debug.log", "a") as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "main.py:635", "message": "Sending PUT request", "data": {"method": "PUT", "url": url}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
-            # #endregion
-            # Try PUT first (apiRecipeImageUpdate)
             response = requests.put(
                 url,
                 headers=headers,
@@ -651,50 +644,31 @@ def _upload_image_to_tandoor(
                 timeout=(10, 60),
             )
             
-            # #region agent log
-            with open("/Users/alex/github/recipe_ai/.cursor/debug.log", "a") as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "A", "location": "main.py:642", "message": "PUT response received", "data": {"status_code": response.status_code, "response_text": response.text[:500]}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
-            # #endregion
+            if response.status_code in (200, 201):
+                return True
+        
+        # If PUT fails, try POST as fallback
+        with image_path.open("rb") as img_file:
+            files = {
+                "image": (image_path.name, img_file, mime_type),
+            }
+            response = requests.post(
+                url,
+                headers=headers,
+                files=files,
+                timeout=(10, 60),
+            )
             
             if response.status_code in (200, 201):
                 return True
-            
-            # If PUT fails, try POST as fallback
-            # #region agent log
-            with open("/Users/alex/github/recipe_ai/.cursor/debug.log", "a") as f:
-                f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "B", "location": "main.py:648", "message": "PUT failed, trying POST", "data": {"put_status": response.status_code}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
-            # #endregion
-            
-            with image_path.open("rb") as img_file:
-                files = {
-                    "image": (image_path.name, img_file, "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"),
-                }
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    files=files,
-                    timeout=(10, 60),
-                )
-                
-                # #region agent log
-                with open("/Users/alex/github/recipe_ai/.cursor/debug.log", "a") as f:
-                    f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "B", "location": "main.py:658", "message": "POST response received", "data": {"status_code": response.status_code, "response_text": response.text[:500]}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
-                # #endregion
-                
-                if response.status_code in (200, 201):
-                    return True
-            
-            print(
-                f"Warning: Failed to upload image for recipe ID {recipe_id} "
-                f"({response.status_code}): {response.text}",
-                file=sys.stderr,
-            )
-            return False
+        
+        print(
+            f"Warning: Failed to upload image for recipe ID {recipe_id} "
+            f"({response.status_code}): {response.text}",
+            file=sys.stderr,
+        )
+        return False
     except Exception as exc:
-        # #region agent log
-        with open("/Users/alex/github/recipe_ai/.cursor/debug.log", "a") as f:
-            f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "C", "location": "main.py:670", "message": "Exception during image upload", "data": {"exception_type": type(exc).__name__, "exception_message": str(exc)}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
-        # #endregion
         print(
             f"Warning: Error uploading image for recipe ID {recipe_id}: {exc}",
             file=sys.stderr,
@@ -705,6 +679,8 @@ def _upload_image_to_tandoor(
 def _send_to_tandoor(recipe: dict, base_url: str, token: str, image_path: Path | None = None) -> bool:
     """
     Send a recipe to Tandoor API, optionally with an image.
+    
+    Uses standard JSON upload for the recipe, then uploads image separately if provided.
     
     Args:
         recipe: Recipe dictionary
@@ -717,55 +693,14 @@ def _send_to_tandoor(recipe: dict, base_url: str, token: str, image_path: Path |
     """
     url = f"{base_url}/api/recipe/"
     
-    # If image is provided, try multipart/form-data upload
-    if image_path and image_path.exists():
-        try:
-            # Remove image_path from recipe dict if it exists (it's metadata, not part of recipe)
-            recipe_data = recipe.copy()
-            recipe_data.pop("image_path", None)
-            
-            with image_path.open("rb") as img_file:
-                files = {
-                    "image": (image_path.name, img_file, "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"),
-                }
-                # Try sending recipe as JSON string in form data
-                data = {
-                    "data": json.dumps(recipe_data, ensure_ascii=False),
-                }
-                headers = {
-                    "Authorization": f"Bearer {token}",
-                    "Accept": "application/json",
-                }
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    data=data,
-                    files=files,
-                    timeout=(10, 300),
-                )
-                
-                if response.status_code in (200, 201):
-                    return True
-                
-                # If multipart fails, fall back to JSON-only and try separate image upload
-                print(
-                    f"Multipart upload failed ({response.status_code}), trying separate upload...",
-                    file=sys.stderr,
-                )
-        except Exception as exc:
-            print(
-                f"Warning: Multipart upload failed: {exc}, trying separate upload...",
-                file=sys.stderr,
-            )
-    
-    # Standard JSON upload (without image or as fallback)
+    # Standard JSON upload
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
     
-    # Remove image_path from recipe if it exists
+    # Remove image_path from recipe if it exists (it's metadata, not part of recipe)
     recipe_clean = recipe.copy()
     recipe_clean.pop("image_path", None)
     
@@ -777,32 +712,15 @@ def _send_to_tandoor(recipe: dict, base_url: str, token: str, image_path: Path |
     )
     
     if response.status_code in (200, 201):
-        # If we have an image and recipe was created, try to upload image separately
+        # If we have an image and recipe was created, upload image separately
         if image_path and image_path.exists():
             try:
                 result = response.json()
                 recipe_id = result.get("id") or result.get("pk")
-                # #region agent log
-                with open("/Users/alex/github/recipe_ai/.cursor/debug.log", "a") as f:
-                    f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "D", "location": "main.py:737", "message": "Recipe created, extracting ID", "data": {"response_keys": list(result.keys()) if isinstance(result, dict) else None, "recipe_id": recipe_id}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
-                # #endregion
                 if recipe_id:
                     print(f"Recipe created with ID {recipe_id}, uploading image...")
-                    upload_success = _upload_image_to_tandoor(image_path, recipe_id, base_url, token)
-                    # #region agent log
-                    with open("/Users/alex/github/recipe_ai/.cursor/debug.log", "a") as f:
-                        f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "D", "location": "main.py:741", "message": "Image upload result", "data": {"success": upload_success}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
-                    # #endregion
-                else:
-                    # #region agent log
-                    with open("/Users/alex/github/recipe_ai/.cursor/debug.log", "a") as f:
-                        f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "D", "location": "main.py:744", "message": "No recipe ID found", "data": {"result": result}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
-                    # #endregion
+                    _upload_image_to_tandoor(image_path, recipe_id, base_url, token)
             except Exception as exc:
-                # #region agent log
-                with open("/Users/alex/github/recipe_ai/.cursor/debug.log", "a") as f:
-                    f.write(json.dumps({"sessionId": "debug-session", "runId": "run1", "hypothesisId": "D", "location": "main.py:747", "message": "Exception extracting recipe ID", "data": {"exception_type": type(exc).__name__, "exception_message": str(exc)}, "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000)}) + "\n")
-                # #endregion
                 print(
                     f"Warning: Could not extract recipe ID for image upload: {exc}",
                     file=sys.stderr,
@@ -855,6 +773,37 @@ def main() -> None:
         # Auto-detect if we should import to Tandoor (if credentials are available)
         base_url = token = ""
         should_import = not args.dry_run
+        
+        # Configure keywords for Tandoor API
+        # Default IDs: Hello Fresh (21), ✨ AI (11)
+        # Format expected by API: [{"id": 0, "name": "string", "description": "string"}]
+        # Can be overridden via TANDOOR_KEYWORD_IDS environment variable (comma-separated: "id1,id2")
+        keyword_config = [
+            {"id": 21, "name": "Hello Fresh", "description": ""},
+            {"id": 11, "name": "✨ AI", "description": ""},
+        ]
+        load_dotenv()
+        keyword_ids_str = os.getenv("TANDOOR_KEYWORD_IDS")
+        if keyword_ids_str:
+            try:
+                keyword_ids = [int(id_str.strip()) for id_str in keyword_ids_str.split(",") if id_str.strip()]
+                if len(keyword_ids) >= 2:
+                    keyword_config = [
+                        {"id": keyword_ids[0], "name": "Hello Fresh", "description": ""},
+                        {"id": keyword_ids[1], "name": "✨ AI", "description": ""},
+                    ]
+                else:
+                    print(
+                        f"Warning: TANDOOR_KEYWORD_IDS should contain at least 2 IDs (comma-separated). "
+                        f"Got {len(keyword_ids)}. Using default keyword IDs.",
+                        file=sys.stderr,
+                    )
+            except ValueError:
+                print(
+                    f"Warning: Invalid TANDOOR_KEYWORD_IDS format '{keyword_ids_str}'. "
+                    "Expected comma-separated integers (e.g., '21,11'). Using default keyword IDs.",
+                    file=sys.stderr,
+                )
         if should_import:
             try:
                 base_url, token = _load_tandoor_config(args)
@@ -866,12 +815,13 @@ def main() -> None:
 
         # Auto-detect if we should generate images (if OPENAI_API_KEY is available)
         should_generate_images = not args.no_images
+        image_api_key = None
         if should_generate_images:
             load_dotenv()
-            if not os.getenv("OPENAI_API_KEY"):
+            image_api_key = os.getenv("OPENAI_API_KEY")
+            if not image_api_key:
                 should_generate_images = False
-                if len(schema_files) == 1:
-                    print("Note: OPENAI_API_KEY not found, skipping image generation (use --no-images to suppress)", file=sys.stderr)
+                print("Note: OPENAI_API_KEY not found, skipping image generation (use --no-images to suppress)", file=sys.stderr)
 
         # Determine image output directory
         image_output_dir = None
@@ -885,15 +835,6 @@ def main() -> None:
                 else:
                     image_output_dir = Path(args.schema_json).expanduser().resolve().parent
             image_output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Load OpenAI API key if image generation is enabled
-        image_api_key = None
-        if should_generate_images:
-            load_dotenv()
-            image_api_key = os.getenv("OPENAI_API_KEY")
-            if not image_api_key:
-                should_generate_images = False
-                print("Warning: OPENAI_API_KEY not found, skipping image generation", file=sys.stderr)
         
         for schema_file in schema_files:
             with schema_file.open("r", encoding="utf-8") as f:
@@ -911,7 +852,7 @@ def main() -> None:
                 )
                 continue
             
-            for schema_recipe in recipes_to_process:
+            for recipe_index, schema_recipe in enumerate(recipes_to_process):
                 if not isinstance(schema_recipe, dict):
                     print(
                         f"Warning: Recipe in {schema_file} is not a dictionary, skipping...",
@@ -920,6 +861,12 @@ def main() -> None:
                     continue
                 
                 tandoor = map_schema_to_tandoor(schema_recipe)
+                
+                # Add keywords in the format expected by Tandoor API:
+                # [{"id": 0, "name": "string", "description": "string"}]
+                # If TANDOOR_KEYWORD_IDS is set (e.g., "1,2"), use those IDs
+                if keyword_config:
+                    tandoor["keywords"] = keyword_config
 
                 # Generate image if enabled
                 image_path = None
@@ -930,7 +877,6 @@ def main() -> None:
                         recipe_name_safe = schema_file.stem
                     # Add index if multiple recipes in one file
                     if len(recipes_to_process) > 1:
-                        recipe_index = recipes_to_process.index(schema_recipe)
                         image_filename = f"{recipe_name_safe}-{recipe_index}.png"
                     else:
                         image_filename = f"{recipe_name_safe}.png"
@@ -955,7 +901,6 @@ def main() -> None:
                 else:
                     # If multiple recipes in one file, add index to filename
                     if len(recipes_to_process) > 1:
-                        recipe_index = recipes_to_process.index(schema_recipe)
                         out_path = schema_file.with_name(f"{schema_file.stem}-{recipe_index}-tandoor.json")
                     else:
                         out_path = schema_file.with_name(f"{schema_file.stem}-tandoor.json")

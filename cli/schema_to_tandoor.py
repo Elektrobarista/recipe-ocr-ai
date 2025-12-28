@@ -120,6 +120,9 @@ def map_schema_to_tandoor(schema_recipe: Dict[str, Any]) -> Dict[str, Any]:
         "source_url": schema_recipe.get("mainEntityOfPage", "")
         or schema_recipe.get("url", ""),
         "nutrition": {},
+        # Keywords will be added in main.py with proper format including id, name, description
+        # Format: [{"id": 0, "name": "string", "description": "string"}]
+        "keywords": [],
     }
 
     # --- Ingredients Mapping ---
