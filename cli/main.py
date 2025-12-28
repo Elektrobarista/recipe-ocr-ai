@@ -468,6 +468,340 @@ def _load_tandoor_config(args: argparse.Namespace) -> tuple[str, str]:
     return base_url.rstrip("/"), token
 
 
+# ============================================================================
+# Intelligent Image Generation: Ingredient Transformation Rules
+# ============================================================================
+
+# Zutatenkategorien mit Keywords und Standard-Transformationen
+INGREDIENT_CATEGORIES = {
+    "fish": {
+        "keywords": [
+            "lachs", "seelachs", "fisch", "forelle", "kabeljau", "scholle",
+            "dorsch", "makrele", "thunfisch", "sardine", "hering", "zander",
+            "barsch", "karpfen", "aal", "garnelen", "krebs", "muscheln",
+            "tintenfisch", "krake", "scampi", "shrimps", "hummer"
+        ],
+        "default_prep": "gekochtes {name}-Filet",
+        "form_keywords": {
+            "stück": "in Stücken",
+            "filet": "als Filet",
+            "würfel": "in Würfeln",
+            "streifen": "in Streifen",
+            "tranche": "als Tranche"
+        },
+        "prep_keywords": {
+            "gebraten": "gebratenes {name}-Filet",
+            "gebacken": "gebackenes {name}-Filet",
+            "gedünstet": "gedünstetes {name}-Filet"
+        }
+    },
+    "meat": {
+        "keywords": [
+            "rind", "rindfleisch", "schwein", "schweinefleisch", "fleisch",
+            "steak", "schnitzel", "kotelett", "braten", "schinken", "speck",
+            "wurst", "salami", "hackfleisch", "hack", "gehackt", "lamm",
+            "lammfleisch", "kalb", "kalbfleisch", "wild", "hase", "reh"
+        ],
+        "default_prep": "gekochtes {name}",
+        "form_keywords": {
+            "stück": "in Stücken",
+            "würfel": "in Würfeln",
+            "streifen": "in Streifen",
+            "scheibe": "in Scheiben",
+            "hack": "als Hackfleisch"
+        },
+        "prep_keywords": {
+            "gebraten": "gebratenes {name}",
+            "gebacken": "gebackenes {name}",
+            "gedünstet": "gedünstetes {name}",
+            "geschmort": "geschmortes {name}",
+            "gegrillt": "gegrilltes {name}"
+        }
+    },
+    "poultry": {
+        "keywords": [
+            "hähnchen", "huhn", "hühnchen", "hühnerfleisch", "puten",
+            "putenfleisch", "ente", "entenbrust", "gans", "wachtel",
+            "hühnerbrust", "hühnerschenkel", "flügel"
+        ],
+        "default_prep": "gekochtes {name}",
+        "form_keywords": {
+            "stück": "in Stücken",
+            "filet": "als Filet",
+            "würfel": "in Würfeln",
+            "streifen": "in Streifen"
+        },
+        "prep_keywords": {
+            "gebraten": "gebratenes {name}",
+            "gebacken": "gebackenes {name}",
+            "gedünstet": "gedünstetes {name}",
+            "gegrillt": "gegrilltes {name}"
+        }
+    },
+    "vegetable": {
+        "keywords": [
+            "kartoffel", "möhre", "karotte", "brokkoli", "blumenkohl",
+            "zucchini", "paprika", "tomate", "gurke", "spinat", "kohl",
+            "weißkohl", "rotkohl", "wirsing", "porree", "lauch", "zwiebel",
+            "knoblauch", "spargel", "erbsen", "bohnen", "linsen", "kichererbsen",
+            "aubergine", "pilz", "champignon", "sellerie", "fenchel", "kürbis"
+        ],
+        "default_prep": "gedünstetes {name}",
+        "prep_keywords": {
+            "stampf": "{name}stampf",
+            "püree": "{name}püree",
+            "gebraten": "gebratenes {name}",
+            "gedünstet": "gedünstetes {name}",
+            "gekocht": "gekochtes {name}",
+            "roh": "rohes {name}"
+        },
+        "form_keywords": {
+            "stück": "in Stücken",
+            "würfel": "in Würfeln",
+            "scheibe": "in Scheiben",
+            "streifen": "in Streifen"
+        }
+    },
+    "grain": {
+        "keywords": [
+            "reis", "nudel", "pasta", "spaghetti", "penne", "farfalle",
+            "bulgur", "couscous", "quinoa", "hafer", "weizen", "dinkel",
+            "haferflocken", "mehl", "semmelbrösel", "panko"
+        ],
+        "default_prep": "gekochte {name}",
+        "prep_keywords": {
+            "gekocht": "gekochte {name}",
+            "gebraten": "gebratene {name}"
+        }
+    },
+    "dairy": {
+        "keywords": [
+            "käse", "mozzarella", "gouda", "cheddar", "feta", "ricotta",
+            "milch", "sahne", "creme", "joghurt", "quark", "butter",
+            "margarine", "schmand", "sauerrahm"
+        ],
+        "default_prep": "{name}",
+        "prep_keywords": {
+            "geschmolzen": "geschmolzener {name}",
+            "gerieben": "geriebener {name}"
+        }
+    }
+}
+
+# Zubereitungsarten-Mappings
+PREPARATION_METHODS = {
+    "cooked": ["kochen", "garen", "dünsten", "köcheln", "sieden"],
+    "fried": ["braten", "anbraten", "schmoren", "sautieren", "schwenken"],
+    "baked": ["backen", "überbacken", "gratinieren"],
+    "mashed": ["stampfen", "pürieren", "zerdrücken", "zermatschen"],
+    "grilled": ["grillen", "grillieren"],
+    "roasted": ["rösten", "anrösten"],
+    "raw": ["roh", "frisch", "unverarbeitet"]
+}
+
+# Form/Präsentations-Keywords
+PRESENTATION_FORMS = {
+    "stück": ["stück", "stücke", "stücken", "portion"],
+    "filet": ["filet", "filets"],
+    "würfel": ["würfel", "würfeln", "gewürfelt"],
+    "streifen": ["streifen", "streifchen", "streifig"],
+    "scheibe": ["scheibe", "scheiben", "tranche"],
+    "hack": ["hack", "hackfleisch", "gehackt", "hacken"],
+    "stampf": ["stampf", "stampfen", "gestampft"],
+    "püree": ["püree", "pürieren", "püriert"]
+}
+
+
+def _categorize_ingredient(ingredient_name: str) -> str | None:
+    """
+    Ordnet eine Zutat einer Kategorie zu basierend auf Keywords.
+    
+    Args:
+        ingredient_name: Name der Zutat
+        
+    Returns:
+        Kategorie-ID (z.B. "fish", "meat", "vegetable") oder None
+    """
+    ingredient_lower = ingredient_name.lower()
+    
+    for category_id, category_data in INGREDIENT_CATEGORIES.items():
+        keywords = category_data.get("keywords", [])
+        for keyword in keywords:
+            if keyword in ingredient_lower:
+                return category_id
+    
+    return None
+
+
+def _extract_preparation_methods(recipe: dict) -> set[str]:
+    """
+    Extrahiert Zubereitungsarten aus Rezeptname, Beschreibung und Anweisungen.
+    
+    Args:
+        recipe: Rezept-Dictionary (schema.org oder Tandoor Format)
+        
+    Returns:
+        Set von erkannten Zubereitungsarten (z.B. {"cooked", "fried"})
+    """
+    found_methods = set()
+    
+    # Analysiere Rezeptname
+    name = recipe.get("name", "").lower()
+    description = recipe.get("description", "").lower()
+    
+    # Analysiere Anweisungen/Steps
+    instructions_text = ""
+    steps = recipe.get("steps", []) or recipe.get("recipeInstructions", [])
+    if isinstance(steps, list):
+        for step in steps:
+            if isinstance(step, dict):
+                step_text = step.get("text", "") or step.get("name", "") or ""
+            elif isinstance(step, str):
+                step_text = step
+            else:
+                step_text = ""
+            instructions_text += " " + step_text.lower()
+    elif isinstance(steps, str):
+        instructions_text = steps.lower()
+    
+    # Kombiniere alle Texte
+    combined_text = f"{name} {description} {instructions_text}".lower()
+    
+    # Suche nach Zubereitungsarten
+    for method_id, keywords in PREPARATION_METHODS.items():
+        for keyword in keywords:
+            if keyword in combined_text:
+                found_methods.add(method_id)
+                break
+    
+    return found_methods
+
+
+def _extract_presentation_form(recipe_name: str, description: str) -> dict[str, str]:
+    """
+    Erkennt Form/Präsentation aus Rezeptnamen und Beschreibung.
+    
+    Args:
+        recipe_name: Name des Rezepts
+        description: Beschreibung des Rezepts
+        
+    Returns:
+        Dictionary mit Form-Mappings: {form_key: form_description}
+    """
+    combined_text = f"{recipe_name} {description}".lower()
+    found_forms = {}
+    
+    for form_key, keywords in PRESENTATION_FORMS.items():
+        for keyword in keywords:
+            if keyword in combined_text:
+                found_forms[form_key] = PRESENTATION_FORMS[form_key][0]
+                break
+    
+    return found_forms
+
+
+def _transform_ingredient_for_image(ingredient_name: str, recipe: dict) -> str:
+    """
+    Transformiert eine Zutat basierend auf Kategorie, Zubereitungsart und Form
+    in ihre zubereitete Form für die Bildgenerierung.
+    
+    Args:
+        ingredient_name: Name der Zutat
+        recipe: Vollständiges Rezept-Dictionary
+        
+    Returns:
+        Transformierte Zutatenbeschreibung
+    """
+    # Kategorisiere Zutat
+    category = _categorize_ingredient(ingredient_name)
+    if not category:
+        # Keine Kategorie gefunden, verwende Original
+        return ingredient_name
+    
+    category_data = INGREDIENT_CATEGORIES[category]
+    recipe_name = recipe.get("name", "").lower()
+    description = recipe.get("description", "").lower()
+    combined_text = f"{recipe_name} {description}".lower()
+    
+    # Extrahiere Zubereitungsarten
+    prep_methods = _extract_preparation_methods(recipe)
+    
+    # Extrahiere Präsentationsform
+    presentation_forms = _extract_presentation_form(recipe_name, description)
+    
+    # Bestimme Zubereitungsart für diese spezifische Zutat
+    prep_keyword = None
+    for method_id in prep_methods:
+        # Mappe Zubereitungsart zu deutschen Begriffen
+        method_keywords = {
+            "cooked": "gekocht",
+            "fried": "gebraten",
+            "baked": "gebacken",
+            "mashed": "gestampft",
+            "grilled": "gegrillt",
+            "roasted": "geröstet",
+            "raw": "roh"
+        }
+        if method_id in method_keywords:
+            prep_keyword = method_keywords[method_id]
+            break
+    
+    # Prüfe ob spezifische Zubereitung für diese Zutat im Rezepttext erwähnt wird
+    ingredient_lower = ingredient_name.lower()
+    specific_prep = None
+    prep_keywords = category_data.get("prep_keywords", {})
+    for prep_key, prep_template in prep_keywords.items():
+        if prep_key in combined_text and any(kw in ingredient_lower for kw in category_data.get("keywords", [])):
+            specific_prep = prep_template.format(name=ingredient_name)
+            break
+    
+    # Bestimme Form
+    form_suffix = ""
+    form_keywords = category_data.get("form_keywords", {})
+    for form_key, form_desc in form_keywords.items():
+        if form_key in presentation_forms or form_key in combined_text:
+            form_suffix = f" {form_desc}"
+            break
+    
+    # Spezielle Behandlung für Gemüse-Stampf/Püree
+    if category == "vegetable":
+        if "stampf" in combined_text or "püree" in combined_text:
+            if "kartoffel" in ingredient_lower:
+                return "Kartoffelstampf"
+            prep_keywords_veg = category_data.get("prep_keywords", {})
+            if "stampf" in prep_keywords_veg:
+                return prep_keywords_veg["stampf"].format(name=ingredient_name)
+            if "püree" in prep_keywords_veg:
+                return prep_keywords_veg["püree"].format(name=ingredient_name)
+    
+    # Verwende spezifische Zubereitung falls gefunden
+    if specific_prep:
+        return specific_prep + form_suffix
+    
+    # Verwende Zubereitungsart aus extrahierten Methoden
+    if prep_keyword:
+        # Erstelle Transformations-String basierend auf Kategorie
+        if category in ("fish", "meat", "poultry"):
+            if category == "fish":
+                return f"{prep_keyword}es {ingredient_name}-Filet{form_suffix}"
+            else:
+                return f"{prep_keyword}es {ingredient_name}{form_suffix}"
+        elif category == "vegetable":
+            return f"{prep_keyword}es {ingredient_name}{form_suffix}"
+        elif category == "grain":
+            return f"{prep_keyword}e {ingredient_name}{form_suffix}"
+    
+    # Fallback: Standard-Transformation der Kategorie
+    default_prep = category_data.get("default_prep", "{name}")
+    transformed = default_prep.format(name=ingredient_name)
+    
+    # Füge Form hinzu falls vorhanden
+    if form_suffix:
+        transformed += form_suffix
+    
+    return transformed
+
+
 def _generate_recipe_image(
     recipe: dict,
     api_key: str,
@@ -530,14 +864,44 @@ def _generate_recipe_image(
                     # Fallback: use the whole string
                     ingredient_names.append(ing)
     
+    # Transform ingredients for better image generation
+    transformed_ingredients = []
+    for ing_name in ingredient_names[:5]:  # Top 5 ingredients
+        transformed = _transform_ingredient_for_image(ing_name, recipe)
+        transformed_ingredients.append(transformed)
+    
+    # Extract preparation methods for prompt enhancement
+    prep_methods = _extract_preparation_methods(recipe)
+    prep_keywords = []
+    if prep_methods:
+        method_descriptions = {
+            "cooked": "gekocht",
+            "fried": "gebraten",
+            "baked": "gebacken",
+            "mashed": "gestampft",
+            "grilled": "gegrillt",
+            "roasted": "geröstet"
+        }
+        for method in prep_methods:
+            if method in method_descriptions:
+                prep_keywords.append(method_descriptions[method])
+    
     # Build prompt
     prompt_parts = [f"Ein appetitliches, professionelles Foto von {name}"]
-    if ingredient_names:
-        main_ingredients = ", ".join(ingredient_names[:5])  # Top 5 ingredients
+    if transformed_ingredients:
+        main_ingredients = ", ".join(transformed_ingredients)
         prompt_parts.append(f"mit {main_ingredients}")
     if description:
         prompt_parts.append(f"({description[:100]})")  # First 100 chars of description
-    prompt_parts.append("auf einem weißen Teller, professionelle Food-Fotografie, natürliches Licht, hochwertig")
+    
+    # Add preparation context if available
+    prompt_style = "auf einem weißen Teller, professionelle Food-Fotografie, natürliches Licht, hochwertig"
+    if prep_keywords:
+        prompt_style += f", {', '.join(prep_keywords)} zubereitet"
+    else:
+        prompt_style += ", fertig zubereitet"
+    
+    prompt_parts.append(prompt_style)
     
     prompt = ". ".join(prompt_parts)
     
