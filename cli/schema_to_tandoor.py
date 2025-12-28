@@ -6,8 +6,26 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-def _parse_number(value: str) -> Optional[float]:
-    """Extract the first numeric value from a string and convert to float."""
+def _parse_number(value: str | float | int) -> Optional[float]:
+    """Extract the first numeric value from a string and convert to float.
+    
+    Also handles numeric types (int, float) directly.
+    """
+    # If value is already a number, return it as float
+    if isinstance(value, (int, float)):
+        return float(value)
+    
+    # If value is not a string, try to convert it
+    if not isinstance(value, str):
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+    
+    # If value is empty string, return None
+    if not value.strip():
+        return None
+    
     # Unterstützt auch Formate mit führendem Dezimaltrennzeichen wie ".5"
     match = re.search(r"[-+]?(?:\d+[.,]?\d*|\d*[.,]\d+)", value)
     if not match:
@@ -172,15 +190,15 @@ def map_schema_to_tandoor(schema_recipe: Dict[str, Any]) -> Dict[str, Any]:
 
     # --- Nutrition Mapping (Tandoor expects numeric macros) ---
     nutrition = schema_recipe.get("nutrition") or {}
-    carbs_src = ""
-    fats_src = ""
-    proteins_src = ""
-    cals_src = ""
+    carbs_src = None
+    fats_src = None
+    proteins_src = None
+    cals_src = None
     if isinstance(nutrition, dict):
-        carbs_src = nutrition.get("carbohydrateContent", "") or ""
-        fats_src = nutrition.get("fatContent", "") or ""
-        proteins_src = nutrition.get("proteinContent", "") or ""
-        cals_src = nutrition.get("calories", "") or ""
+        carbs_src = nutrition.get("carbohydrateContent")
+        fats_src = nutrition.get("fatContent")
+        proteins_src = nutrition.get("proteinContent")
+        cals_src = nutrition.get("calories")
 
     tandoor["nutrition"] = {
         # Tandoor expects numeric macros; fallback auf 0.0 wenn unbekannt

@@ -56,33 +56,64 @@ Optionally, you can adjust the model used or the maximum response length with `-
 
 ### Mode 2: schema.org Recipe JSON → Tandoor JSON (+ optional import)
 
-- **Convert Single File (without import)**
+The tool automatically detects available features based on environment variables:
+
+- **Automatic Tandoor Import**: If `TANDOOR_BASE_URL` and `TANDOOR_API_TOKEN` are set, recipes are automatically imported to Tandoor.
+- **Automatic Image Generation**: If `OPENAI_API_KEY` is set, preview images are automatically generated for each recipe.
+
+- **Simple Usage (with auto-detection)**
 
 ```bash
-python -m cli.main \
-  --schema-json ./output/recipe.json \
-  --tandoor-dry-run
-```
-
-  - Reads a schema.org Recipe JSON.
-  - Converts it to a Tandoor-compatible JSON.
-  - Writes `<recipe-stem>-tandoor.json` next to the input file.
-
-- **Convert Entire Folder and Import to Tandoor**
-
-```bash
+# Set up environment variables
 export TANDOOR_BASE_URL="https://tandoor.example.com"
 export TANDOOR_API_TOKEN="your-api-token"
+export OPENAI_API_KEY="your-openai-api-key"
 
-python -m cli.main \
-  --schema-dir ./output
+# Convert and import - everything happens automatically!
+python -m cli.main --schema-dir ./output
 ```
 
   - Reads all `*.json` in `./output`.
-  - Creates `<name>-tandoor.json` for each.
-  - POSTs each recipe to `"$TANDOOR_BASE_URL/api/recipe/"`.
+  - Converts each to Tandoor JSON format.
+  - **Automatically generates images** (if `OPENAI_API_KEY` is set).
+  - **Automatically imports to Tandoor** (if credentials are set).
+  - Images are saved locally and uploaded to Tandoor.
 
-Alternatively, `--tandoor-base-url` and `--tandoor-token` can be used as CLI arguments instead of environment variables. With `--tandoor-dry-run`, only the Tandoor JSON files are created without making an API call.
+- **Dry Run (JSON only, no API calls)**
+
+```bash
+python -m cli.main \
+  --schema-dir ./output \
+  --dry-run
+```
+
+  - Only creates Tandoor JSON files, no API calls.
+  - Useful for testing or manual review.
+
+- **Disable Image Generation**
+
+```bash
+python -m cli.main \
+  --schema-dir ./output \
+  --no-images
+```
+
+  - Skips image generation even if `OPENAI_API_KEY` is set.
+
+- **Custom Image Directory**
+
+```bash
+python -m cli.main \
+  --schema-dir ./output \
+  --image-output-dir ./images
+```
+
+  - Saves generated images to a custom directory (default: same as schema JSON directory).
+
+**Note:** 
+- Images are generated using DALL-E 3 and automatically uploaded to Tandoor when importing.
+- You can use `--tandoor-base-url` and `--tandoor-token` as CLI arguments instead of environment variables.
+- The upload uses multipart/form-data or a separate image upload endpoint, depending on Tandoor's API capabilities.
 
 ### Mode 3: Import Already Converted Tandoor JSONs Directly
 
