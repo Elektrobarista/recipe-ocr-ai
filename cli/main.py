@@ -1030,12 +1030,14 @@ def _upload_image_to_tandoor(
             f"Warning: Failed to upload image for recipe ID {recipe_id} "
             f"({response.status_code}): {response.text}",
             file=sys.stderr,
+            flush=True,
         )
         return False
     except Exception as exc:
         print(
             f"Warning: Error uploading image for recipe ID {recipe_id}: {exc}",
             file=sys.stderr,
+            flush=True,
         )
         return False
 
@@ -1076,27 +1078,158 @@ def _send_to_tandoor(recipe: dict, base_url: str, token: str, image_path: Path |
     )
     
     if response.status_code in (200, 201):
-        # If we have an image and recipe was created, upload image separately
+        # Recipe was successfully created
+        # If we have an image, try to upload it separately (optional/secondary operation)
         if image_path and image_path.exists():
             try:
                 result = response.json()
                 recipe_id = result.get("id") or result.get("pk")
                 if recipe_id:
-                    print(f"Recipe created with ID {recipe_id}, uploading image...")
-                    _upload_image_to_tandoor(image_path, recipe_id, base_url, token)
+                    print(f"Recipe created with ID {recipe_id}, uploading image...", flush=True)
+                    image_upload_success = _upload_image_to_tandoor(image_path, recipe_id, base_url, token)
+                    if not image_upload_success:
+                        print(
+                            f"Warning: Recipe created but image upload failed for recipe ID {recipe_id}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        # Don't return False - recipe was successfully created, image upload is optional
+                else:
+                    print(
+                        f"Warning: Recipe created but could not extract recipe ID for image upload",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    # Don't return False - recipe was successfully created
             except Exception as exc:
                 print(
                     f"Warning: Could not extract recipe ID for image upload: {exc}",
                     file=sys.stderr,
+                    flush=True,
                 )
+                # Don't return False - recipe was successfully created
         return True
 
     print(
         f"Failed to import recipe '{recipe.get('name', '')}' "
         f"({response.status_code}): {response.text}",
         file=sys.stderr,
+        flush=True,
     )
     return False
+
+
+def _process_single_recipe(task_data: dict) -> tuple[bool, str]:
+    """
+    Verarbeitet ein einzelnes Rezept: Konvertierung, Bildgenerierung, JSON, Upload.
+    
+    Args:
+        task_data: Dict mit allen benötigten Parametern:
+            - schema_recipe: dict
+            - schema_file: Path
+            - recipe_index: int
+            - total_recipes_in_file: int
+            - keyword_config: list[dict] | None
+            - should_generate_images: bool
+            - image_output_dir: Path | None
+            - image_api_key: str | None
+            - should_import: bool
+            - base_url: str
+            - token: str
+            - tandoor_out: str | None (from args)
+            - schema_files: list[Path] (for output path determination)
+    
+    Returns:
+        (success: bool, message: str)
+    """
+    try:
+        schema_recipe = task_data["schema_recipe"]
+        schema_file = task_data["schema_file"]
+        recipe_index = task_data["recipe_index"]
+        total_recipes_in_file = task_data["total_recipes_in_file"]
+        keyword_config = task_data["keyword_config"]
+        should_generate_images = task_data["should_generate_images"]
+        image_output_dir = task_data["image_output_dir"]
+        image_api_key = task_data["image_api_key"]
+        should_import = task_data["should_import"]
+        base_url = task_data["base_url"]
+        token = task_data["token"]
+        tandoor_out = task_data.get("tandoor_out")
+        schema_files = task_data["schema_files"]
+        
+        # 1. Konvertierung
+        tandoor = map_schema_to_tandoor(schema_recipe)
+        
+        # Add keywords
+        if keyword_config:
+            tandoor["keywords"] = keyword_config
+        
+        recipe_name = tandoor.get("name", "Rezept")
+        print(f"[{recipe_name}] Starte Verarbeitung...", flush=True)
+        
+        # 2. Bildgenerierung (falls aktiviert)
+        image_path = None
+        if should_generate_images and image_output_dir:
+            print(f"[{recipe_name}] Generiere Bild...", flush=True)
+            # Use recipe name for image filename, fallback to schema file stem + index
+            recipe_name_safe = "".join(c for c in recipe_name if c.isalnum() or c in (" ", "-", "_")).strip()[:50]
+            if not recipe_name_safe:
+                recipe_name_safe = schema_file.stem
+            # Add index if multiple recipes in one file
+            if total_recipes_in_file > 1:
+                image_filename = f"{recipe_name_safe}-{recipe_index}.png"
+            else:
+                image_filename = f"{recipe_name_safe}.png"
+            image_path = image_output_dir / image_filename
+            
+            generated_path = _generate_recipe_image(
+                recipe=tandoor,
+                api_key=image_api_key,
+                output_path=image_path,
+            )
+            if generated_path:
+                image_path = generated_path
+                print(f"[{recipe_name}] Bild gespeichert: {image_path}", flush=True)
+            else:
+                image_path = None
+                print(f"[{recipe_name}] Warnung: Bildgenerierung fehlgeschlagen", file=sys.stderr, flush=True)
+        
+        # 3. JSON schreiben
+        # Determine output path
+        if tandoor_out and len(schema_files) == 1 and total_recipes_in_file == 1:
+            out_path = Path(tandoor_out).expanduser().resolve()
+        else:
+            # If multiple recipes in one file, add index to filename
+            if total_recipes_in_file > 1:
+                out_path = schema_file.with_name(f"{schema_file.stem}-{recipe_index}-tandoor.json")
+            else:
+                out_path = schema_file.with_name(f"{schema_file.stem}-tandoor.json")
+        
+        # Remove image_path from recipe before writing JSON (it's only needed for API upload)
+        tandoor_clean = tandoor.copy()
+        tandoor_clean.pop("image_path", None)
+        
+        out_path.write_text(
+            json.dumps(tandoor_clean, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"[{recipe_name}] JSON geschrieben: {out_path}", flush=True)
+        
+        # 4. Upload (falls aktiviert)
+        if should_import:
+            print(f"[{recipe_name}] Upload zu Tandoor...", flush=True)
+            upload_success = _send_to_tandoor(tandoor, base_url=base_url, token=token, image_path=image_path)
+            if upload_success:
+                print(f"[{recipe_name}] ✓ Upload erfolgreich", flush=True)
+            else:
+                print(f"[{recipe_name}] ✗ Upload fehlgeschlagen", file=sys.stderr, flush=True)
+                return (False, f"{recipe_name} - Upload fehlgeschlagen")
+        
+        return (True, f"{recipe_name} - JSON: {out_path}")
+        
+    except Exception as exc:
+        recipe_name = task_data.get("schema_recipe", {}).get("name", "Unknown")
+        return (False, f"{recipe_name}: {exc}")
 
 
 def main() -> None:
@@ -1171,11 +1304,13 @@ def main() -> None:
         if should_import:
             try:
                 base_url, token = _load_tandoor_config(args)
-            except SystemExit:
+            except SystemExit as exc:
                 # Credentials not available, skip import
                 should_import = False
                 if len(schema_files) == 1:
-                    print("Note: Tandoor credentials not found, skipping API import (use --dry-run to suppress)", file=sys.stderr)
+                    # Preserve the specific error message from _load_tandoor_config
+                    error_msg = str(exc) if exc.args else "Tandoor credentials not found"
+                    print(f"Note: {error_msg}, skipping API import (use --dry-run to suppress)", file=sys.stderr, flush=True)
 
         # Auto-detect if we should generate images (if OPENAI_API_KEY is available)
         should_generate_images = not args.no_images
@@ -1200,6 +1335,23 @@ def main() -> None:
                     image_output_dir = Path(args.schema_json).expanduser().resolve().parent
             image_output_dir.mkdir(parents=True, exist_ok=True)
         
+        # Get concurrency setting for parallel processing
+        load_dotenv()
+        concurrency_str = os.getenv("RECIPE_PROCESSING_CONCURRENCY", "5")
+        try:
+            concurrency = int(concurrency_str)
+        except ValueError:
+            print(
+                f"Warning: Invalid RECIPE_PROCESSING_CONCURRENCY value '{concurrency_str}'. "
+                "Expected an integer. Using default value of 5.",
+                file=sys.stderr,
+                flush=True,
+            )
+            concurrency = 5
+        concurrency = max(1, min(concurrency, 20))
+        
+        # Phase 1: Collect all recipes into tasks
+        tasks = []
         for schema_file in schema_files:
             with schema_file.open("r", encoding="utf-8") as f:
                 schema_data = json.load(f)
@@ -1224,63 +1376,55 @@ def main() -> None:
                     )
                     continue
                 
-                tandoor = map_schema_to_tandoor(schema_recipe)
-                
-                # Add keywords in the format expected by Tandoor API:
-                # [{"id": 0, "name": "string", "description": "string"}]
-                # If TANDOOR_KEYWORD_IDS is set (e.g., "1,2"), use those IDs
-                if keyword_config:
-                    tandoor["keywords"] = keyword_config
-
-                # Generate image if enabled
-                image_path = None
-                if should_generate_images and image_output_dir:
-                    # Use recipe name for image filename, fallback to schema file stem + index
-                    recipe_name_safe = "".join(c for c in tandoor.get("name", "recipe") if c.isalnum() or c in (" ", "-", "_")).strip()[:50]
-                    if not recipe_name_safe:
-                        recipe_name_safe = schema_file.stem
-                    # Add index if multiple recipes in one file
-                    if len(recipes_to_process) > 1:
-                        image_filename = f"{recipe_name_safe}-{recipe_index}.png"
-                    else:
-                        image_filename = f"{recipe_name_safe}.png"
-                    image_path = image_output_dir / image_filename
-                    
-                    print(f"Generiere Bild für '{tandoor.get('name', 'Rezept')}'...")
-                    generated_path = _generate_recipe_image(
-                        recipe=tandoor,
-                        api_key=image_api_key,
-                        output_path=image_path,
-                    )
-                    if generated_path:
-                        print(f"Bild gespeichert: {generated_path}")
-                        image_path = generated_path
-                    else:
-                        print(f"Warnung: Bildgenerierung für '{tandoor.get('name')}' fehlgeschlagen", file=sys.stderr)
-                        image_path = None
-
-                # Determine output path
-                if args.tandoor_out and len(schema_files) == 1 and len(recipes_to_process) == 1:
-                    out_path = Path(args.tandoor_out).expanduser().resolve()
+                tasks.append({
+                    "schema_recipe": schema_recipe,
+                    "schema_file": schema_file,
+                    "recipe_index": recipe_index,
+                    "total_recipes_in_file": len(recipes_to_process),
+                    "keyword_config": keyword_config,
+                    "should_generate_images": should_generate_images,
+                    "image_output_dir": image_output_dir,
+                    "image_api_key": image_api_key,
+                    "should_import": should_import,
+                    "base_url": base_url,
+                    "token": token,
+                    "tandoor_out": args.tandoor_out,
+                    "schema_files": schema_files,
+                })
+        
+        if not tasks:
+            print("No recipes to process.", file=sys.stderr)
+            return
+        
+        # Phase 2: Parallel execution
+        results = []
+        print(f"Verarbeite {len(tasks)} Rezept(e) mit {concurrency} parallelen Worker(s)...\n", flush=True)
+        if len(tasks) == 1 or concurrency == 1:
+            # Sequential processing for single task or concurrency=1
+            for task in tasks:
+                success, message = _process_single_recipe(task)
+                results.append((success, message))
+                if success:
+                    print(f"✓ {message}", flush=True)
                 else:
-                    # If multiple recipes in one file, add index to filename
-                    if len(recipes_to_process) > 1:
-                        out_path = schema_file.with_name(f"{schema_file.stem}-{recipe_index}-tandoor.json")
-                    else:
-                        out_path = schema_file.with_name(f"{schema_file.stem}-tandoor.json")
-
-                # Remove image_path from recipe before writing JSON (it's only needed for API upload)
-                tandoor_clean = tandoor.copy()
-                tandoor_clean.pop("image_path", None)
-
-                out_path.write_text(
-                    json.dumps(tandoor_clean, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-                print(f"Tandoor JSON written to {out_path}")
-
-                if should_import:
-                    _send_to_tandoor(tandoor, base_url=base_url, token=token, image_path=image_path)
+                    print(f"✗ {message}", file=sys.stderr, flush=True)
+        else:
+            # Parallel processing
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                futures = {executor.submit(_process_single_recipe, task): task for task in tasks}
+                for future in as_completed(futures):
+                    success, message = future.result()
+                    results.append((success, message))
+                    # Status wird bereits in _process_single_recipe() ausgegeben
+                    # Hier nur finale Bestätigung
+                    if not success:
+                        print(f"✗ {message}", file=sys.stderr, flush=True)
+        
+        # Phase 3: Summary
+        success_count = sum(1 for s, _ in results if s)
+        print(f"\nFertig: {success_count}/{len(results)} Rezepte erfolgreich verarbeitet", flush=True)
+        if success_count < len(results):
+            print(f"Warnung: {len(results) - success_count} Rezepte fehlgeschlagen", file=sys.stderr, flush=True)
 
         return
 
